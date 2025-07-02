@@ -35,19 +35,21 @@ export const ConversationSelector = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [currentZip, setCurrentZip] = useState<JSZipFile | null>(null);
+  const [isSupabaseConfigured, setIsSupabaseConfigured] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // Initialize Supabase when component mounts
-    const setup = async () => {
+    // Check if Supabase is configured but don't show any errors yet
+    const checkSupabase = async () => {
       try {
         await initDatabase();
+        setIsSupabaseConfigured(true);
       } catch (error) {
-        console.error('Failed to initialize Supabase:', error);
-        Alert.alert('Database Error', 'Could not connect to Supabase. Please check your connection settings.');
+        console.warn('Supabase not configured:', error);
+        setIsSupabaseConfigured(false);
       }
     };
-
-    setup();
+    
+    checkSupabase();
   }, []);
 
   const handleWhatsAppExport = async () => {
@@ -65,7 +67,7 @@ export const ConversationSelector = () => {
 
       // Get the path of the selected file
       const uri = result.assets[0].uri;
-
+      
       // Read the zip file as binary data
       const zipData = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64
@@ -75,25 +77,25 @@ export const ConversationSelector = () => {
       const zip = new JSZip();
       const loadedZip = await zip.loadAsync(zipData, { base64: true }) as JSZipFile;
       setCurrentZip(loadedZip);
-
+      
       // Process the contents
       const exportedConversations: Conversation[] = [];
       let currentChat: Conversation | null = null;
-
+      
       // First, find the chat text file
-      const chatFiles = Object.values(loadedZip.files).filter(file =>
+      const chatFiles = Object.values(loadedZip.files).filter(file => 
         file.name.endsWith('_chat.txt') || file.name.endsWith('.txt')
       );
 
       for (const chatFile of chatFiles) {
         const content = await chatFile.async('string');
         const lines = content.split('\n');
-
+        
         // Extract chat name from the first message (usually the encryption notice)
         const firstLine = lines[0];
         const nameMatch = firstLine.match(/\] ([^:]+):/);
         const chatName = nameMatch ? nameMatch[1] : 'Unknown Chat';
-
+        
         currentChat = {
           id: String(exportedConversations.length + 1),
           name: chatName,
@@ -110,7 +112,7 @@ export const ConversationSelector = () => {
               // Extract timestamp from the line
               const timestampMatch = line.match(/\[([\d/]+,\s*[\d:]+\s*[APM]+)\]/);
               const timestamp = timestampMatch ? timestampMatch[1] : '';
-
+              
               currentChat.voiceNotes.push({
                 id: audioFileName,
                 path: audioFileName,
@@ -140,6 +142,15 @@ export const ConversationSelector = () => {
   };
 
   const exportVoiceNotes = async () => {
+    // Check Supabase configuration before proceeding
+    if (!isSupabaseConfigured) {
+      Alert.alert(
+        'Supabase Not Configured',
+        'Please set up your Supabase credentials in the .env file:\n\nEXPO_PUBLIC_SUPABASE_URL=your_url\nEXPO_PUBLIC_SUPABASE_ANON_KEY=your_key'
+      );
+      return;
+    }
+
     if (!currentZip) {
       Alert.alert('Error', 'Please import the WhatsApp export file again');
       return;
@@ -160,7 +171,7 @@ export const ConversationSelector = () => {
         for (const note of conv.voiceNotes) {
           try {
             // Find the audio file in the zip
-            const audioFile = Object.values(currentZip.files).find(file =>
+            const audioFile = Object.values(currentZip.files).find(file => 
               file.name === note.path || file.name.endsWith('/' + note.path)
             );
 
@@ -171,7 +182,7 @@ export const ConversationSelector = () => {
 
             // Extract the audio file content as base64
             const audioContent = await audioFile.async('base64');
-
+            
             // Parse date string from timestamp (format: [MM/DD/YY, HH:MM:SS AM/PM])
             let parsedDate = new Date();
             try {
@@ -181,10 +192,10 @@ export const ConversationSelector = () => {
                 const [month, day, year] = datePart.split('/').map(n => parseInt(n));
                 let [time, period] = timePart.split(' ');
                 let [hours, minutes, seconds] = time.split(':').map(n => parseInt(n));
-
+                
                 if (period === 'PM' && hours < 12) hours += 12;
                 if (period === 'AM' && hours === 12) hours = 0;
-
+                
                 parsedDate = new Date(2000 + year, month - 1, day, hours, minutes, seconds);
               }
             } catch (err) {
@@ -198,7 +209,7 @@ export const ConversationSelector = () => {
               parsedDate.toISOString(),
               audioContent
             );
-
+            
             exportedCount++;
           } catch (err) {
             console.warn(`Failed to export voice note: ${note.path}`, err);
@@ -224,7 +235,7 @@ export const ConversationSelector = () => {
   };
 
   const toggleConversation = (id: string) => {
-    setConversations(conversations.map(conv =>
+    setConversations(conversations.map(conv => 
       conv.id === id ? { ...conv, selected: !conv.selected } : conv
     ));
   };
@@ -234,7 +245,7 @@ export const ConversationSelector = () => {
       <ThemedText type="title" style={styles.title}>
         WhatsApp Voice Notes Export
       </ThemedText>
-
+      
       {Platform.OS === 'android' && (
         <ThemedView style={styles.buttonContainer}>
           <Link href="/android-direct-access" asChild>
@@ -247,8 +258,8 @@ export const ConversationSelector = () => {
       )}
 
       <ThemedView style={styles.buttonContainer}>
-        <ThemedText
-          type="defaultSemiBold"
+        <ThemedText 
+          type="defaultSemiBold" 
           style={[styles.button, isLoading && styles.buttonDisabled]}
           onPress={importWhatsAppData}>
           {isLoading ? 'Processing...' : 'Import WhatsApp Export'}
@@ -260,12 +271,12 @@ export const ConversationSelector = () => {
           <ThemedText type="subtitle" style={styles.subtitle}>
             Select Conversations to Export
           </ThemedText>
-
+          
           <FlatList
             data={conversations}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
-              <ThemedView
+              <ThemedView 
                 style={[
                   styles.conversationItem,
                   item.selected && styles.selectedItem
@@ -292,14 +303,20 @@ export const ConversationSelector = () => {
           />
 
           <ThemedView style={styles.buttonContainer}>
-            <ThemedText
-              type="defaultSemiBold"
+            <ThemedText 
+              type="defaultSemiBold" 
               style={[styles.button, isLoading && styles.buttonDisabled]}
               onPress={exportVoiceNotes}>
               {isLoading ? 'Processing...' : 'Export Voice Notes to Supabase'}
             </ThemedText>
           </ThemedView>
         </>
+      )}
+
+      {!isSupabaseConfigured && conversations.length > 0 && (
+        <ThemedText style={[styles.instructions, styles.warning]}>
+          ⚠️ Supabase is not configured. You can still browse voice notes, but you'll need to set up Supabase credentials in your .env file to export them.
+        </ThemedText>
       )}
 
       <ThemedText style={styles.instructions}>
@@ -365,5 +382,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     lineHeight: 20,
+  },
+  warning: {
+    color: '#ff5c5c',
+    fontWeight: 'bold',
   },
 }); 
