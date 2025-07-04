@@ -50,6 +50,41 @@ export const ConversationSelector = () => {
     setup();
   }, []);
 
+  const debugZipContents = async (loadedZip: JSZipFile) => {
+    console.log('=== ZIP CONTENTS DEBUG ===');
+    const allFiles = Object.keys(loadedZip.files);
+    console.log('Total files in zip:', allFiles.length);
+
+    allFiles.forEach((fileName, index) => {
+      console.log(`${index + 1}. ${fileName}`);
+    });
+
+    // Look for text files
+    const textFiles = allFiles.filter(name => name.endsWith('.txt'));
+    console.log('Text files found:', textFiles);
+
+    // Look for audio files
+    const audioFiles = allFiles.filter(name =>
+      name.includes('.opus') ||
+      name.includes('.m4a') ||
+      name.includes('.aac') ||
+      name.includes('.mp3') ||
+      name.includes('PTT-') // WhatsApp voice message prefix
+    );
+    console.log('Audio files found:', audioFiles);
+
+    // Check if files are in subdirectories
+    const hasSubdirs = allFiles.some(name => name.includes('/'));
+    console.log('Has subdirectories:', hasSubdirs);
+
+    if (hasSubdirs) {
+      const dirs = [...new Set(allFiles.map(name => name.split('/')[0]).filter(dir => dir))];
+      console.log('Subdirectories:', dirs);
+    }
+
+    return { textFiles, audioFiles, allFiles };
+  };
+
   const handleWhatsAppExport = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -76,64 +111,190 @@ export const ConversationSelector = () => {
       const loadedZip = await zip.loadAsync(zipData, { base64: true }) as JSZipFile;
       setCurrentZip(loadedZip);
 
+      // DEBUG: Log zip contents
+      const { textFiles, audioFiles, allFiles } = await debugZipContents(loadedZip);
+
       // Process the contents
       const exportedConversations: Conversation[] = [];
-      let currentChat: Conversation | null = null;
 
-      // First, find the chat text file
-      const chatFiles = Object.values(loadedZip.files).filter(file =>
-        file.name.endsWith('_chat.txt') || file.name.endsWith('.txt')
-      );
+      // look for various patterns
+      const possibleChatFiles = allFiles.filter(fileName => {
+        const lowerName = fileName.toLowerCase();
+        return lowerName.endsWith('.txt') ||
+          lowerName.includes('chat') ||
+          lowerName.includes('whatsapp');
+      });
 
-      for (const chatFile of chatFiles) {
-        const content = await chatFile.async('string');
-        const lines = content.split('\n');
+      console.log('Possible chat files:', possibleChatFiles);
 
-        // Extract chat name from the first message (usually the encryption notice)
-        const firstLine = lines[0];
-        const nameMatch = firstLine.match(/\] ([^:]+):/);
-        const chatName = nameMatch ? nameMatch[1] : 'Unknown Chat';
+      if (possibleChatFiles.length === 0) {
+        Alert.alert('Debug Info', `No chat files found. All files: ${allFiles.slice(0, 10).join(', ')}${allFiles.length > 10 ? '...' : ''}`);
+        return;
+      }
 
-        currentChat = {
-          id: String(exportedConversations.length + 1),
-          name: chatName,
-          selected: false,
-          voiceNotes: []
-        };
+      for (const chatFileName of possibleChatFiles) {
+        try {
+          const chatFile = loadedZip.files[chatFileName];
+          if (!chatFile) {
+            console.log(`Chat file not found: ${chatFileName}`);
+            continue;
+          }
 
-        // Process each line to find voice notes
-        for (const line of lines) {
-          if (line.includes('<attached: ') && line.includes('-AUDIO-') && line.includes('.opus>')) {
-            const audioMatch = line.match(/(\d+-AUDIO-[^>]+\.opus)/);
-            if (audioMatch) {
-              const audioFileName = audioMatch[1];
-              // Extract timestamp from the line
-              const timestampMatch = line.match(/\[([\d/]+,\s*[\d:]+\s*[APM]+)\]/);
-              const timestamp = timestampMatch ? timestampMatch[1] : '';
+          const content = await chatFile.async('string');
+          const lines = content.split('\n').filter(line => line.trim());
 
-              currentChat.voiceNotes.push({
-                id: audioFileName,
-                path: audioFileName,
-                timestamp
-              });
+          console.log(`Processing chat file: ${chatFileName}`);
+          console.log(`Total lines: ${lines.length}`);
+          console.log(`First 3 lines:`, lines.slice(0, 3));
+
+          // name extraction
+          let chatName = 'Unknown Chat';
+
+          // Try different patterns to extract chat name
+          for (let i = 0; i < Math.min(10, lines.length); i++) {
+            const line = lines[i];
+
+            // Pattern 1: WhatsApp format with encryption notice
+            let nameMatch = line.match(/\] ([^:]+):/);
+            if (nameMatch && !nameMatch[1].includes('WhatsApp') && !nameMatch[1].includes('Messages')) {
+              chatName = nameMatch[1];
+              break;
+            }
+
+            // Pattern 2: Group chat format
+            nameMatch = line.match(/\] ([^:]+) created group/);
+            if (nameMatch) {
+              chatName = nameMatch[1];
+              break;
+            }
+
+            // Pattern 3: Extract from filename
+            if (chatFileName.includes('WhatsApp Chat with ')) {
+              chatName = chatFileName.replace('WhatsApp Chat with ', '').replace('.txt', '');
+              break;
+            }
+
+            // Pattern 4: Extract from filename (alternative format)
+            if (chatFileName.includes('_chat')) {
+              chatName = chatFileName.replace('_chat.txt', '').replace(/_/g, ' ');
+              break;
             }
           }
-        }
 
-        if (currentChat.voiceNotes.length > 0) {
-          exportedConversations.push(currentChat);
+          const currentChat: Conversation = {
+            id: String(exportedConversations.length + 1),
+            name: chatName,
+            selected: false,
+            voiceNotes: []
+          };
+
+          // Enhanced voice note detection with multiple patterns
+          let voiceNotesFound = 0;
+
+          for (const line of lines) {
+            let audioFileName = '';
+            let timestamp = '';
+
+            // Extract timestamp first (common pattern)
+            const timestampMatch = line.match(/\[([\d/]+,\s*[\d:]+\s*[APM]*)\]/);
+            timestamp = timestampMatch ? timestampMatch[1] : '';
+
+            // Pattern 1: iOS format - <attached: filename-AUDIO-xxx.opus>
+            if (line.includes('<attached:') && line.includes('-AUDIO-') && line.includes('.opus')) {
+              const audioMatch = line.match(/(\d+-AUDIO-[^>]+\.opus)/);
+              if (audioMatch) {
+                audioFileName = audioMatch[1];
+              }
+            }
+
+            // Pattern 2: Android format - <attached: PTT-xxxxxxxx-WAxxxx.opus>
+            else if (line.includes('<attached:') && line.includes('PTT-') && line.includes('.opus')) {
+              const audioMatch = line.match(/PTT-[^>]+\.opus/);
+              if (audioMatch) {
+                audioFileName = audioMatch[0];
+              }
+            }
+
+            // Pattern 3: General attached audio files
+            else if (line.includes('<attached:') && (line.includes('.opus') || line.includes('.m4a') || line.includes('.aac'))) {
+              const audioMatch = line.match(/<attached:\s*([^>]+\.(opus|m4a|aac))/i);
+              if (audioMatch) {
+                audioFileName = audioMatch[1].trim();
+              }
+            }
+
+            // Pattern 4: Voice message indicators without <attached:>
+            else if (line.includes('voice message') || line.includes('audio message')) {
+              // Try to find corresponding audio file by timestamp or position
+              const potentialAudioFile = audioFiles.find(file => {
+                const fileBaseName = file.split('/').pop() || '';
+                return fileBaseName.includes('PTT-') || fileBaseName.includes('AUDIO-');
+              });
+
+              if (potentialAudioFile) {
+                audioFileName = potentialAudioFile.split('/').pop() || potentialAudioFile;
+              }
+            }
+
+            // Pattern 5: Direct filename reference in line
+            else if (line.match(/PTT-[^>\s]+\.opus/)) {
+              const audioMatch = line.match(/PTT-[^>\s]+\.opus/);
+              if (audioMatch) {
+                audioFileName = audioMatch[0];
+              }
+            }
+
+            if (audioFileName) {
+              // Check if this audio file actually exists in the zip
+              const audioFileExists = audioFiles.some(file =>
+                file.includes(audioFileName) ||
+                file.endsWith(audioFileName) ||
+                audioFileName.includes(file.split('/').pop() || '')
+              );
+
+              if (audioFileExists || true) { // Allow even if not found for debugging
+                currentChat.voiceNotes.push({
+                  id: audioFileName,
+                  path: audioFileName,
+                  timestamp: timestamp || 'No timestamp'
+                });
+                voiceNotesFound++;
+              }
+            }
+          }
+
+          console.log(`Voice notes found in ${chatFileName}: ${voiceNotesFound}`);
+
+          if (currentChat.voiceNotes.length > 0) {
+            exportedConversations.push(currentChat);
+          }
+
+        } catch (fileError) {
+          console.error(`Error processing chat file ${chatFileName}:`, fileError);
         }
       }
 
       if (exportedConversations.length > 0) {
+        const totalVoiceNotes = exportedConversations.reduce((sum, conv) => sum + conv.voiceNotes.length, 0);
         setConversations(exportedConversations);
-        Alert.alert('Success', `Found ${exportedConversations.reduce((sum, conv) => sum + conv.voiceNotes.length, 0)} voice notes in ${exportedConversations.length} conversations`);
+        Alert.alert('Success', `Found ${totalVoiceNotes} voice notes in ${exportedConversations.length} conversations`);
       } else {
-        Alert.alert('No Voice Notes', 'No voice notes found in the exported chat');
+        // Enhanced debug info
+        const debugInfo = `
+Total files: ${allFiles.length}
+Text files: ${textFiles.length}
+Audio files: ${audioFiles.length}
+Sample text files: ${possibleChatFiles.slice(0, 3).join(', ')}
+Sample audio files: ${audioFiles.slice(0, 3).join(', ')}
+        `.trim();
+
+        Alert.alert('Debug Info', debugInfo);
+        console.log('No voice notes found. Full file list:', allFiles);
       }
+
     } catch (error: any) {
       console.error('Error processing zip:', error);
-      Alert.alert('Error', 'Failed to process WhatsApp export. Make sure you selected a valid WhatsApp chat export file.');
+      Alert.alert('Error', `Failed to process WhatsApp export: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -156,18 +317,43 @@ export const ConversationSelector = () => {
 
       // Export voice notes from selected conversations
       let exportedCount = 0;
+      let notFoundCount = 0;
+
       for (const conv of selectedConversations) {
         for (const note of conv.voiceNotes) {
           try {
-            // Find the audio file in the zip
-            const audioFile = Object.values(currentZip.files).find(file =>
-              file.name === note.path || file.name.endsWith('/' + note.path)
+            // Enhanced audio file search - try multiple patterns
+            let audioFile = null;
+
+            // Try exact match first
+            audioFile = Object.values(currentZip.files).find(file =>
+              file.name === note.path
             );
+
+            // Try with path variations
+            if (!audioFile) {
+              audioFile = Object.values(currentZip.files).find(file =>
+                file.name.endsWith('/' + note.path) ||
+                file.name.includes(note.path) ||
+                note.path.includes(file.name.split('/').pop() || '')
+              );
+            }
+
+            // Try matching audio files by pattern
+            if (!audioFile) {
+              audioFile = Object.values(currentZip.files).find(file => {
+                const fileName = file.name.split('/').pop() || '';
+                return fileName.includes('PTT-') || fileName.includes('AUDIO-') || fileName.includes('.opus');
+              });
+            }
 
             if (!audioFile) {
               console.warn(`Audio file not found in zip: ${note.path}`);
+              notFoundCount++;
               continue;
             }
+
+            console.log(`Found audio file: ${audioFile.name} for note: ${note.path}`);
 
             // Extract the audio file content as base64
             const audioContent = await audioFile.async('base64');
@@ -193,7 +379,7 @@ export const ConversationSelector = () => {
 
             // Store in Supabase
             await storeVoiceNote(
-              note.path,
+              audioFile.name,
               conv.name,
               parsedDate.toISOString(),
               audioContent
@@ -207,9 +393,9 @@ export const ConversationSelector = () => {
       }
 
       if (exportedCount > 0) {
-        Alert.alert('Success', `Exported ${exportedCount} voice notes successfully to Supabase`);
+        Alert.alert('Success', `Exported ${exportedCount} voice notes successfully to Supabase${notFoundCount > 0 ? `\n(${notFoundCount} files not found)` : ''}`);
       } else {
-        Alert.alert('Error', 'No voice notes could be exported. Please try importing the chat export again.');
+        Alert.alert('Error', `No voice notes could be exported. ${notFoundCount} files not found in zip.`);
       }
     } catch (error: any) {
       console.error('Export error:', error);
@@ -308,7 +494,8 @@ export const ConversationSelector = () => {
         2. In WhatsApp, open a chat{'\n'}
         3. Tap the contact name at the top{'\n'}
         4. Scroll down and tap "Export Chat"{'\n'}
-        5. Choose "Include Media" and select the exported .zip file.
+        5. Choose "Include Media" and select the exported .zip file.{'\n'}
+        6. Check console/logs for detailed debug information if issues occur.
       </ThemedText>
     </ThemedView>
   );
@@ -366,4 +553,4 @@ const styles = StyleSheet.create({
     color: '#666',
     lineHeight: 20,
   },
-}); 
+});
